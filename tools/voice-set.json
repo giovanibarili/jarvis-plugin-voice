@@ -1,0 +1,14 @@
+{
+  "name": "voice_set",
+  "description": "Change the TTS voice. Use voice_list to see available voices.",
+  "type": "script",
+  "command": "bash",
+  "args": ["tools/scripts/voice-set.sh", "${voice}"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "voice": { "type": "string", "description": "Voice ID (e.g. 'bm_george', 'pm_alex', 'af_nova')" }
+    },
+    "required": ["voice"]
+  }
+}

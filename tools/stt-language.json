@@ -1,0 +1,14 @@
+{
+  "name": "stt_language",
+  "description": "Set the speech-to-text language. Use 'auto' for auto-detection, or 'en', 'pt', 'es', 'fr', 'ja'.",
+  "type": "script",
+  "command": "bash",
+  "args": ["tools/scripts/stt-language.sh", "${language}"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "language": { "type": "string", "description": "Language code ('auto', 'en', 'pt', 'es', 'fr', 'ja')" }
+    },
+    "required": ["language"]
+  }
+}
