@@ -5,7 +5,7 @@
   "author": "giovanibarili",
   "entry": "pieces/index.ts",
   "capabilities": {
-    "tools": true,
+    "tools": false,
     "pieces": true,
     "renderers": true,
     "prompts": true

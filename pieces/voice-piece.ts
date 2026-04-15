@@ -47,6 +47,7 @@ export class VoicePiece implements Piece {
   readonly name = "Voice I/O";
 
   private bus!: EventBus;
+  private toolRegistry: any;
   private config: VoiceConfig;
   private speaking = false;
   private latestAudio: Buffer | null = null;
@@ -60,8 +61,10 @@ export class VoicePiece implements Piece {
   private kokoroProcess: ChildProcess | null = null;
   private kokoroStartAttempted = false;
   private audioStreamClients = new Set<ServerResponse>();
+  private started = false;
 
   constructor(ctx: PluginContext) {
+    this.toolRegistry = ctx.toolRegistry;
     const saved = ctx.config as Record<string, unknown>;
     this.config = {
       ttsUrl: (saved.ttsUrl as string) ?? process.env.JARVIS_TTS_URL ?? "http://localhost:8880",
@@ -79,11 +82,13 @@ export class VoicePiece implements Piece {
     return `## Voice I/O Plugin
 TTS: Kokoro engine at ${this.config.ttsUrl}. Voice: ${this.config.voice}. Enabled: ${this.config.enabled}. Healthy: ${this.ttsHealthy}.
 STT: Whisper on port 50055. Language: ${this.config.sttLanguage}.
-Tools: voice_set, voice_list, stt_language (loaded from plugin tools/).
+Tools: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable), stt_language (change STT lang).
 Voice categories: af_* (American Female), am_* (American Male), bf_* (British Female), bm_* (British Male), pm_* (Portuguese Male), pf_* (Portuguese Female).`;
   }
 
   async start(bus: EventBus): Promise<void> {
+    if (this.started) return;
+    this.started = true;
     this.bus = bus;
 
     this.bus.subscribe("core.main.stream.complete", (msg: any) => this.handleComplete(msg));
@@ -99,7 +104,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
         status: this.config.enabled ? "running" : "stopped",
         data: this.getData(),
         position: { x: 10, y: 400 },
-        size: { width: 220, height: 180 },
+        size: { width: 220, height: 280 },
         renderer: { plugin: "jarvis-plugin-voice", file: "VoiceRenderer" },
       },
     });
@@ -114,7 +119,12 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       else if (req.url?.startsWith("/latest.mp3")) { this.serveLatest(res); }
       else { res.writeHead(404); res.end(); }
     });
+    this.server.on("error", (err: any) => {
+      console.error(`VoicePiece: audio server failed on port ${this.config.port}:`, err.message);
+    });
     this.server.listen(this.config.port);
+
+    this.registerTools();
 
     // TTS health check with boot phase
     const bootCheck = setInterval(async () => {
@@ -169,14 +179,16 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No body");
 
+      console.log(`VoicePiece: TTS streaming started, ${this.audioStreamClients.size} stream clients connected`);
       const chunks: Uint8Array[] = [];
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value) {
           chunks.push(value);
+          console.log(`VoicePiece: chunk ${chunks.length}, ${value.length} bytes, clients: ${this.audioStreamClients.size}`);
           for (const client of this.audioStreamClients) {
-            try { client.write(Buffer.from(value)); } catch {}
+            try { client.write(Buffer.from(value)); } catch (e) { console.error('VoicePiece: client write failed', e); }
           }
         }
       }
@@ -185,6 +197,8 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       this.totalSpoken++;
     } catch {} finally {
       this.speaking = false;
+      // Close stream clients so the renderer knows this audio is complete
+      // The renderer will reconnect automatically for the next speech
       for (const client of this.audioStreamClients) { try { client.end(); } catch {} }
       this.audioStreamClients.clear();
       this.updateHud();
@@ -196,9 +210,12 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     try { healthy = (await fetch(`${this.config.ttsUrl}/health`)).ok; } catch {}
     const was = this.ttsHealthy;
     this.ttsHealthy = healthy;
-    if (this.bootDone && healthy !== was) {
-      if (!healthy && !this.kokoroProcess) this.startKokoro();
-      this.notifyCore(healthy);
+    if (healthy !== was) {
+      this.updateHud();
+      if (this.bootDone) {
+        if (!healthy && !this.kokoroProcess) this.startKokoro();
+        this.notifyCore(healthy);
+      }
     }
   }
 
@@ -258,6 +275,83 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       .replace(/\n/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+  }
+
+  private registerTools(): void {
+    this.toolRegistry.register({
+      name: "voice_set",
+      description: "Change the TTS voice. Use voice_list to see available voices.",
+      input_schema: {
+        type: "object",
+        properties: {
+          voice: { type: "string", description: "Voice ID (e.g. 'bm_george', 'pm_alex', 'af_nova')" },
+        },
+        required: ["voice"],
+      },
+      handler: async (input: any) => {
+        this.config.voice = String(input.voice);
+        this.updateHud();
+        return { ok: true, voice: this.config.voice, message: `Voice changed to ${this.config.voice}` };
+      },
+    });
+
+    this.toolRegistry.register({
+      name: "voice_list",
+      description: "List all available TTS voices from the Kokoro engine.",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => {
+        try {
+          const res = await fetch(`${this.config.ttsUrl}/v1/audio/voices`);
+          const data = await res.json() as { voices: string[] };
+          return {
+            current: this.config.voice,
+            voices: data.voices,
+            categories: {
+              "af_*": "American Female", "am_*": "American Male",
+              "bf_*": "British Female", "bm_*": "British Male",
+              "ef_*": "European Female", "em_*": "European Male",
+              "pm_*": "Portuguese Male", "pf_*": "Portuguese Female",
+            },
+          };
+        } catch (err) {
+          return { error: `TTS server unreachable: ${err}` };
+        }
+      },
+    });
+
+    this.toolRegistry.register({
+      name: "stt_language",
+      description: "Set the speech-to-text language. Use 'auto' for auto-detection, or a code like 'en', 'pt', 'es'.",
+      input_schema: {
+        type: "object",
+        properties: {
+          language: { type: "string", description: "Language code ('auto', 'en', 'pt', 'es', 'fr', 'ja')" },
+        },
+        required: ["language"],
+      },
+      handler: async (input: any) => {
+        this.config.sttLanguage = String(input.language).toLowerCase();
+        this.updateHud();
+        return { ok: true, sttLanguage: this.config.sttLanguage };
+      },
+    });
+
+    this.toolRegistry.register({
+      name: "voice_toggle",
+      description: "Enable or disable TTS voice output.",
+      input_schema: {
+        type: "object",
+        properties: {
+          enabled: { type: "boolean", description: "true to enable, false to disable" },
+        },
+        required: ["enabled"],
+      },
+      handler: async (input: any) => {
+        this.config.enabled = Boolean(input.enabled);
+        this.updateHud();
+        return { ok: true, enabled: this.config.enabled };
+      },
+    });
   }
 
   private getData(): Record<string, unknown> {
