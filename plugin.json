@@ -8,6 +8,6 @@
     "tools": false,
     "pieces": true,
     "renderers": true,
-    "prompts": true
+    "prompts": false
   }
 }

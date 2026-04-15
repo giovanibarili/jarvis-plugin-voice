@@ -11,7 +11,6 @@ interface VoiceData {
   speaking?: boolean;
   totalSpoken?: number;
   ttsHealthy?: boolean | null;
-  sttLanguage?: string;
   model?: string;
 }
 
@@ -210,7 +209,6 @@ export default function VoiceRenderer({ state }: { state: { status: string; data
         <DataRow label="VOICE" value={d.voice ?? '—'} color="#8cf" />
         <DataRow label="MODEL" value={d.model ?? '—'} color="#8cf" />
         <DataRow label="TTS" value={ttsLabels[tts]} color={ttsColors[tts]} />
-        <DataRow label="STT" value={d.sttLanguage?.toUpperCase() ?? 'AUTO'} color="#8cf" />
         <DataRow label="SENT" value={String(totalSpoken)} color="#adf" />
       </div>
     </div>

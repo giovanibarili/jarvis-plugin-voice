@@ -37,14 +37,13 @@ interface VoiceConfig {
   voice: string;
   enabled: boolean;
   port: number;
-  sttLanguage: string;
   kokoroDir: string;
   kokoroAutoStart: boolean;
 }
 
 export class VoicePiece implements Piece {
   readonly id = "voice";
-  readonly name = "Voice I/O";
+  readonly name = "Voice Output";
 
   private bus!: EventBus;
   private toolRegistry: any;
@@ -72,17 +71,15 @@ export class VoicePiece implements Piece {
       voice: (saved.voice as string) ?? process.env.JARVIS_TTS_VOICE ?? "bm_george",
       enabled: process.env.JARVIS_TTS_ENABLED !== "false",
       port: Number(process.env.JARVIS_VOICE_PORT ?? "50054"),
-      sttLanguage: (saved.sttLanguage as string) ?? process.env.JARVIS_STT_LANG ?? "auto",
       kokoroDir: process.env.JARVIS_KOKORO_DIR ?? `${process.env.HOME}/dev/personal/kokoro-local`,
       kokoroAutoStart: process.env.JARVIS_KOKORO_AUTOSTART !== "false",
     };
   }
 
   systemContext(): string {
-    return `## Voice I/O Plugin
+    return `## Voice Output Plugin
 TTS: Kokoro engine at ${this.config.ttsUrl}. Voice: ${this.config.voice}. Enabled: ${this.config.enabled}. Healthy: ${this.ttsHealthy}.
-STT: Whisper on port 50055. Language: ${this.config.sttLanguage}.
-Tools: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable), stt_language (change STT lang).
+Tools: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable).
 Voice categories: af_* (American Female), am_* (American Male), bf_* (British Female), bm_* (British Male), pm_* (Portuguese Male), pf_* (Portuguese Female).`;
   }
 
@@ -320,23 +317,6 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     });
 
     this.toolRegistry.register({
-      name: "stt_language",
-      description: "Set the speech-to-text language. Use 'auto' for auto-detection, or a code like 'en', 'pt', 'es'.",
-      input_schema: {
-        type: "object",
-        properties: {
-          language: { type: "string", description: "Language code ('auto', 'en', 'pt', 'es', 'fr', 'ja')" },
-        },
-        required: ["language"],
-      },
-      handler: async (input: any) => {
-        this.config.sttLanguage = String(input.language).toLowerCase();
-        this.updateHud();
-        return { ok: true, sttLanguage: this.config.sttLanguage };
-      },
-    });
-
-    this.toolRegistry.register({
       name: "voice_toggle",
       description: "Enable or disable TTS voice output.",
       input_schema: {
@@ -362,7 +342,6 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       speaking: this.speaking,
       totalSpoken: this.totalSpoken,
       ttsHealthy: this.ttsHealthy,
-      sttLanguage: this.config.sttLanguage,
     };
   }
 
