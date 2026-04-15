@@ -129,6 +129,12 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     // HTTP route for voice toggle (used by HUD renderer click)
     this.ctx.registerRoute("POST", "/plugins/voice/toggle", (_req: any, res: any) => {
       this.config.enabled = !this.config.enabled;
+      // If disabling, immediately stop any playing audio
+      if (!this.config.enabled) {
+        this.speaking = false;
+        for (const client of this.audioStreamClients) { try { client.end(); } catch {} }
+        this.audioStreamClients.clear();
+      }
       this.updateHud();
       res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
       res.end(JSON.stringify({ ok: true, enabled: this.config.enabled }));
