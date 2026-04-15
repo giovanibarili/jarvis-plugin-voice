@@ -6,8 +6,8 @@ import { existsSync } from "node:fs";
 // These interfaces match what @jarvis/core exports
 
 interface EventBus {
-  publish<T>(topic: string, data: any): void;
-  subscribe<T>(topic: string, handler: (msg: T) => void | Promise<void>): () => void;
+  publish(msg: any): void;
+  subscribe(channel: string, handler: (msg: any) => void | Promise<void>): () => void;
 }
 
 interface Piece {
@@ -24,12 +24,6 @@ interface PluginContext {
   config: Record<string, unknown>;
   pluginDir: string;
 }
-
-const HUD_TOPICS = {
-  ADD: "hud.piece.add",
-  UPDATE: "hud.piece.update",
-  REMOVE: "hud.piece.remove",
-} as const;
 
 interface VoiceConfig {
   ttsUrl: string;
@@ -88,12 +82,16 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     this.started = true;
     this.bus = bus;
 
-    this.bus.subscribe("core.main.stream.complete", (msg: any) => this.handleComplete(msg));
+    this.bus.subscribe("ai.stream", (msg: any) => {
+      if (msg.target === "main" && msg.event === "complete") this.handleComplete(msg);
+    });
 
     // Register HUD piece with renderer metadata
-    this.bus.publish(HUD_TOPICS.ADD, {
-      sessionId: "system",
-      componentId: this.id,
+    this.bus.publish({
+      channel: "hud.update",
+      source: this.id,
+      action: "add",
+      pieceId: this.id,
       piece: {
         pieceId: this.id,
         type: "panel",
@@ -142,16 +140,12 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     this.kokoroProcess?.kill();
     this.kokoroProcess = null;
     this.server?.close();
-    this.bus.publish(HUD_TOPICS.REMOVE, {
-      sessionId: "system",
-      componentId: this.id,
-      pieceId: this.id,
-    });
+    this.bus.publish({ channel: "hud.update", source: this.id, action: "remove", pieceId: this.id });
   }
 
   private async handleComplete(msg: any): Promise<void> {
     if (!this.config.enabled || !this.ttsHealthy) return;
-    const text = this.stripMarkdown(String(msg.fullText ?? "").trim());
+    const text = this.stripMarkdown(String(msg.text ?? "").trim());
     if (!text) return;
 
     this.speaking = true;
@@ -244,9 +238,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     const text = healthy
       ? `[SYSTEM] Voice plugin: TTS (Kokoro) online. Voice: ${this.config.voice}.`
       : `[SYSTEM] Voice plugin: TTS (Kokoro) offline at ${this.config.ttsUrl}.`;
-    this.bus.publish("input.prompt", {
-      sessionId: "main", componentId: this.id, text,
-    });
+    this.bus.publish({ channel: "system.event", source: this.id, event: "tts.health", data: { healthy, message: text } });
   }
 
   private serveAudioStream(req: IncomingMessage, res: ServerResponse): void {
@@ -346,9 +338,10 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
   }
 
   private updateHud(): void {
-    this.bus.publish(HUD_TOPICS.UPDATE, {
-      sessionId: "system",
-      componentId: this.id,
+    this.bus.publish({
+      channel: "hud.update",
+      source: this.id,
+      action: "update",
       pieceId: this.id,
       data: this.getData(),
       status: this.speaking ? "processing" : this.config.enabled ? "running" : "stopped",
