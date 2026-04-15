@@ -23,6 +23,8 @@ interface PluginContext {
   toolRegistry: any;
   config: Record<string, unknown>;
   pluginDir: string;
+  sessionFactory: any;
+  registerRoute: (method: string, path: string, handler: any) => void;
 }
 
 interface VoiceConfig {
@@ -56,7 +58,10 @@ export class VoicePiece implements Piece {
   private audioStreamClients = new Set<ServerResponse>();
   private started = false;
 
+  private ctx: PluginContext;
+
   constructor(ctx: PluginContext) {
+    this.ctx = ctx;
     this.toolRegistry = ctx.toolRegistry;
     const saved = ctx.config as Record<string, unknown>;
     this.config = {
@@ -120,6 +125,14 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     this.server.listen(this.config.port);
 
     this.registerTools();
+
+    // HTTP route for voice toggle (used by HUD renderer click)
+    this.ctx.registerRoute("POST", "/plugins/voice/toggle", (_req: any, res: any) => {
+      this.config.enabled = !this.config.enabled;
+      this.updateHud();
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ ok: true, enabled: this.config.enabled }));
+    });
 
     // TTS health check with boot phase
     const bootCheck = setInterval(async () => {

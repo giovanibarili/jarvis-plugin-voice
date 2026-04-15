@@ -124,8 +124,15 @@ export default function VoiceRenderer({ state }: { state: { status: string; data
       display: 'flex',
       flexDirection: 'column',
     }}>
-      {/* Orb — uses same CSS classes as ReactorCore from hud.css */}
-      <div className="orbWrapper" style={{ width: size, height: size, margin: '4px auto 4px' }}>
+      {/* Orb — click to toggle voice on/off */}
+      <div
+        className="orbWrapper"
+        style={{ width: size, height: size, margin: '4px auto 4px', cursor: 'pointer' }}
+        onClick={() => {
+          fetch('/plugins/voice/toggle', { method: 'POST' }).catch(() => {});
+        }}
+        title={enabled ? 'Click to disable voice' : 'Click to enable voice'}
+      >
         {/* Ambient glow */}
         <div className="orbGlow" style={{
           width: size * 0.8,

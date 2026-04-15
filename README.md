@@ -6,9 +6,9 @@ This is a **Phase 2 plugin** — it provides a backend Piece (VoicePiece), a fro
 
 ## How it works
 
-When JARVIS responds to a message, VoicePiece intercepts the `stream.complete` event, sends the text to Kokoro TTS, and streams the MP3 audio to the HUD. The VoiceRenderer connects to the audio stream on mount and plays audio in real-time as chunks arrive. Between utterances, the connection stays idle and reconnects automatically.
+When JARVIS responds to a message, VoicePiece listens on the `ai.stream` channel for `complete` events targeted at the main session, sends the text to Kokoro TTS, and streams the MP3 audio to the HUD. The VoiceRenderer connects to the audio stream on mount and plays audio in real-time as chunks arrive. Between utterances, the connection reconnects automatically.
 
-The HUD panel displays a morphing orb (same visual as the JARVIS core reactor) that changes color based on state: blue when online, green when speaking, red when TTS is offline, and yellow during initialization. VoicePiece auto-starts Kokoro if it detects the TTS server is down.
+The HUD panel displays a morphing orb (same visual as the JARVIS core reactor) that changes color based on state: blue when online, green when speaking, red when TTS is offline, and yellow during initialization. Click the orb to toggle voice on/off. VoicePiece auto-starts Kokoro if it detects the TTS server is down.
 
 ## Install
 
