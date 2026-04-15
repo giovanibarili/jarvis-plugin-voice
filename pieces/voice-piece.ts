@@ -25,6 +25,7 @@ interface PluginContext {
   pluginDir: string;
   sessionFactory: any;
   registerRoute: (method: string, path: string, handler: any) => void;
+  saveConfig: (config: Record<string, unknown>) => void;
 }
 
 interface VoiceConfig {
@@ -68,7 +69,7 @@ export class VoicePiece implements Piece {
       ttsUrl: (saved.ttsUrl as string) ?? process.env.JARVIS_TTS_URL ?? "http://localhost:8880",
       model: (saved.model as string) ?? "kokoro",
       voice: (saved.voice as string) ?? process.env.JARVIS_TTS_VOICE ?? "bm_george",
-      enabled: process.env.JARVIS_TTS_ENABLED !== "false",
+      enabled: saved.enabled !== undefined ? Boolean(saved.enabled) : process.env.JARVIS_TTS_ENABLED !== "false",
       port: Number(process.env.JARVIS_VOICE_PORT ?? "50054"),
       kokoroDir: process.env.JARVIS_KOKORO_DIR ?? `${process.env.HOME}/dev/personal/kokoro-local`,
       kokoroAutoStart: process.env.JARVIS_KOKORO_AUTOSTART !== "false",
@@ -136,6 +137,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
         this.audioStreamClients.clear();
       }
       this.updateHud();
+      this.persistConfig();
       res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
       res.end(JSON.stringify({ ok: true, enabled: this.config.enabled }));
     });
@@ -299,6 +301,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       handler: async (input: any) => {
         this.config.voice = String(input.voice);
         this.updateHud();
+        this.persistConfig();
         return { ok: true, voice: this.config.voice, message: `Voice changed to ${this.config.voice}` };
       },
     });
@@ -340,8 +343,16 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       handler: async (input: any) => {
         this.config.enabled = Boolean(input.enabled);
         this.updateHud();
+        this.persistConfig();
         return { ok: true, enabled: this.config.enabled };
       },
+    });
+  }
+
+  private persistConfig(): void {
+    this.ctx.saveConfig({
+      voice: this.config.voice,
+      enabled: this.config.enabled,
     });
   }
 
