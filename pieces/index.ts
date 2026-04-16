@@ -3,7 +3,7 @@ import { VoicePiece } from "./voice-piece.js";
 
 interface PluginContext {
   bus: any;
-  toolRegistry: any;
+  capabilityRegistry: any;
   config: Record<string, unknown>;
   pluginDir: string;
 }

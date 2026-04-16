@@ -20,7 +20,7 @@ interface Piece {
 
 interface PluginContext {
   bus: EventBus;
-  toolRegistry: any;
+  capabilityRegistry: any;
   config: Record<string, unknown>;
   pluginDir: string;
   sessionFactory: any;
@@ -43,7 +43,7 @@ export class VoicePiece implements Piece {
   readonly name = "Voice Output";
 
   private bus!: EventBus;
-  private toolRegistry: any;
+  private capabilityRegistry: any;
   private config: VoiceConfig;
   private speaking = false;
   private latestAudio: Buffer | null = null;
@@ -63,7 +63,7 @@ export class VoicePiece implements Piece {
 
   constructor(ctx: PluginContext) {
     this.ctx = ctx;
-    this.toolRegistry = ctx.toolRegistry;
+    this.capabilityRegistry = ctx.capabilityRegistry;
     const saved = ctx.config as Record<string, unknown>;
     this.config = {
       ttsUrl: (saved.ttsUrl as string) ?? process.env.JARVIS_TTS_URL ?? "http://localhost:8880",
@@ -79,7 +79,7 @@ export class VoicePiece implements Piece {
   systemContext(): string {
     return `## Voice Output Plugin
 TTS: Kokoro engine at ${this.config.ttsUrl}. Voice: ${this.config.voice}. Enabled: ${this.config.enabled}. Healthy: ${this.ttsHealthy}.
-Tools: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable).
+Capabilities: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable).
 Voice categories: af_* (American Female), am_* (American Male), bf_* (British Female), bm_* (British Male), pm_* (Portuguese Male), pf_* (Portuguese Female).`;
   }
 
@@ -125,7 +125,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
     });
     this.server.listen(this.config.port);
 
-    this.registerTools();
+    this.registerCapabilities();
 
     // HTTP route for voice toggle (used by HUD renderer click)
     this.ctx.registerRoute("POST", "/plugins/voice/toggle", (_req: any, res: any) => {
@@ -287,8 +287,8 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       .trim();
   }
 
-  private registerTools(): void {
-    this.toolRegistry.register({
+  private registerCapabilities(): void {
+    this.capabilityRegistry.register({
       name: "voice_set",
       description: "Change the TTS voice. Use voice_list to see available voices.",
       input_schema: {
@@ -306,7 +306,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       },
     });
 
-    this.toolRegistry.register({
+    this.capabilityRegistry.register({
       name: "voice_list",
       description: "List all available TTS voices from the Kokoro engine.",
       input_schema: { type: "object", properties: {} },
@@ -330,7 +330,7 @@ Voice categories: af_* (American Female), am_* (American Male), bf_* (British Fe
       },
     });
 
-    this.toolRegistry.register({
+    this.capabilityRegistry.register({
       name: "voice_toggle",
       description: "Enable or disable TTS voice output.",
       input_schema: {
