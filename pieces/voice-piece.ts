@@ -1,0 +1,380 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+
+// Use structural typing — no import from @jarvis/core needed at runtime
+// These interfaces match what @jarvis/core exports
+
+interface EventBus {
+  publish(msg: any): void;
+  subscribe(channel: string, handler: (msg: any) => void | Promise<void>): () => void;
+}
+
+interface Piece {
+  readonly id: string;
+  readonly name: string;
+  start(bus: EventBus): Promise<void>;
+  stop(): Promise<void>;
+  systemContext?(): string;
+}
+
+interface PluginContext {
+  bus: EventBus;
+  capabilityRegistry: any;
+  config: Record<string, unknown>;
+  pluginDir: string;
+  sessionFactory: any;
+  registerRoute: (method: string, path: string, handler: any) => void;
+  saveConfig: (config: Record<string, unknown>) => void;
+}
+
+interface VoiceConfig {
+  ttsUrl: string;
+  model: string;
+  voice: string;
+  enabled: boolean;
+  port: number;
+  kokoroDir: string;
+  kokoroAutoStart: boolean;
+}
+
+export class VoicePiece implements Piece {
+  readonly id = "voice";
+  readonly name = "Voice Output";
+
+  private bus!: EventBus;
+  private capabilityRegistry: any;
+  private config: VoiceConfig;
+  private speaking = false;
+  private latestAudio: Buffer | null = null;
+  private latestAudioId = "";
+  private totalSpoken = 0;
+  private server?: ReturnType<typeof createServer>;
+  private ttsHealthy: boolean | null = null;
+  private healthInterval?: ReturnType<typeof setInterval>;
+  private bootRetries = 0;
+  private bootDone = false;
+  private kokoroProcess: ChildProcess | null = null;
+  private kokoroStartAttempted = false;
+  private audioStreamClients = new Set<ServerResponse>();
+  private started = false;
+
+  private ctx: PluginContext;
+
+  constructor(ctx: PluginContext) {
+    this.ctx = ctx;
+    this.capabilityRegistry = ctx.capabilityRegistry;
+    const saved = ctx.config as Record<string, unknown>;
+    this.config = {
+      ttsUrl: (saved.ttsUrl as string) ?? process.env.JARVIS_TTS_URL ?? "http://localhost:8880",
+      model: (saved.model as string) ?? "kokoro",
+      voice: (saved.voice as string) ?? process.env.JARVIS_TTS_VOICE ?? "bm_george",
+      enabled: saved.enabled !== undefined ? Boolean(saved.enabled) : process.env.JARVIS_TTS_ENABLED !== "false",
+      port: Number(process.env.JARVIS_VOICE_PORT ?? "50054"),
+      kokoroDir: process.env.JARVIS_KOKORO_DIR ?? `${process.env.HOME}/dev/personal/kokoro-local`,
+      kokoroAutoStart: process.env.JARVIS_KOKORO_AUTOSTART !== "false",
+    };
+  }
+
+  systemContext(): string {
+    return `## Voice Output Plugin
+TTS: Kokoro engine at ${this.config.ttsUrl}. Voice: ${this.config.voice}. Enabled: ${this.config.enabled}. Healthy: ${this.ttsHealthy}.
+Capabilities: voice_set (change voice), voice_list (list voices), voice_toggle (enable/disable).
+Voice categories: af_* (American Female), am_* (American Male), bf_* (British Female), bm_* (British Male), pm_* (Portuguese Male), pf_* (Portuguese Female).`;
+  }
+
+  async start(bus: EventBus): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+    this.bus = bus;
+
+    this.bus.subscribe("ai.stream", (msg: any) => {
+      if (msg.target === "main" && msg.event === "complete") this.handleComplete(msg);
+    });
+
+    // Register HUD piece with renderer metadata
+    this.bus.publish({
+      channel: "hud.update",
+      source: this.id,
+      action: "add",
+      pieceId: this.id,
+      piece: {
+        pieceId: this.id,
+        type: "panel",
+        name: this.name,
+        status: this.config.enabled ? "running" : "stopped",
+        data: this.getData(),
+        position: { x: 10, y: 400 },
+        size: { width: 220, height: 280 },
+        renderer: { plugin: "jarvis-plugin-voice", file: "VoiceRenderer" },
+      },
+    });
+
+    // Audio stream server
+    this.server = createServer((req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      if (req.url?.startsWith("/stream.mp3")) { this.serveAudioStream(req, res); }
+      else if (req.url?.startsWith("/latest.mp3")) { this.serveLatest(res); }
+      else { res.writeHead(404); res.end(); }
+    });
+    this.server.on("error", (err: any) => {
+      console.error(`VoicePiece: audio server failed on port ${this.config.port}:`, err.message);
+    });
+    this.server.listen(this.config.port);
+
+    this.registerCapabilities();
+
+    // HTTP route for voice toggle (used by HUD renderer click)
+    this.ctx.registerRoute("POST", "/plugins/voice/toggle", (_req: any, res: any) => {
+      this.config.enabled = !this.config.enabled;
+      // If disabling, immediately stop any playing audio
+      if (!this.config.enabled) {
+        this.speaking = false;
+        for (const client of this.audioStreamClients) { try { client.end(); } catch {} }
+        this.audioStreamClients.clear();
+      }
+      this.updateHud();
+      this.persistConfig();
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ ok: true, enabled: this.config.enabled }));
+    });
+
+    // TTS health check with boot phase
+    const bootCheck = setInterval(async () => {
+      await this.checkTtsHealth();
+      this.bootRetries++;
+      if (this.bootRetries === 1 && !this.ttsHealthy) this.startKokoro();
+      if (this.ttsHealthy || this.bootRetries >= 10) {
+        clearInterval(bootCheck);
+        this.bootDone = true;
+        if (!this.ttsHealthy) this.notifyCore(false);
+        this.healthInterval = setInterval(() => this.checkTtsHealth(), 10000);
+      }
+    }, 5000);
+  }
+
+  async stop(): Promise<void> {
+    if (this.healthInterval) clearInterval(this.healthInterval);
+    this.kokoroProcess?.kill();
+    this.kokoroProcess = null;
+    this.server?.close();
+    this.bus.publish({ channel: "hud.update", source: this.id, action: "remove", pieceId: this.id });
+  }
+
+  private async handleComplete(msg: any): Promise<void> {
+    if (!this.config.enabled || !this.ttsHealthy) return;
+    const text = this.stripMarkdown(String(msg.text ?? "").trim());
+    if (!text) return;
+
+    this.speaking = true;
+    this.latestAudioId = crypto.randomUUID();
+    this.latestAudio = null;
+    this.updateHud();
+
+    try {
+      const response = await fetch(`${this.config.ttsUrl}/v1/audio/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: this.config.model,
+          input: text.slice(0, 4096),
+          voice: this.config.voice,
+          stream: true,
+          response_format: "mp3",
+        }),
+      });
+      if (!response.ok) throw new Error(`TTS: ${response.status}`);
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No body");
+
+      console.log(`VoicePiece: TTS streaming started, ${this.audioStreamClients.size} stream clients connected`);
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          console.log(`VoicePiece: chunk ${chunks.length}, ${value.length} bytes, clients: ${this.audioStreamClients.size}`);
+          for (const client of this.audioStreamClients) {
+            try { client.write(Buffer.from(value)); } catch (e) { console.error('VoicePiece: client write failed', e); }
+          }
+        }
+      }
+
+      this.latestAudio = Buffer.concat(chunks.map(c => Buffer.from(c)));
+      this.totalSpoken++;
+    } catch {} finally {
+      this.speaking = false;
+      // Close stream clients so the renderer knows this audio is complete
+      // The renderer will reconnect automatically for the next speech
+      for (const client of this.audioStreamClients) { try { client.end(); } catch {} }
+      this.audioStreamClients.clear();
+      this.updateHud();
+    }
+  }
+
+  private async checkTtsHealth(): Promise<void> {
+    let healthy = false;
+    try { healthy = (await fetch(`${this.config.ttsUrl}/health`)).ok; } catch {}
+    const was = this.ttsHealthy;
+    this.ttsHealthy = healthy;
+    if (healthy !== was) {
+      this.updateHud();
+      if (this.bootDone) {
+        if (!healthy && !this.kokoroProcess) this.startKokoro();
+        this.notifyCore(healthy);
+      }
+    }
+  }
+
+  private startKokoro(): void {
+    if (this.kokoroStartAttempted || !this.config.kokoroAutoStart) return;
+    this.kokoroStartAttempted = true;
+    const dir = this.config.kokoroDir;
+    const py = `${dir}/venv/bin/python3`;
+    if (!existsSync(py)) return;
+
+    this.kokoroProcess = spawn(py, ["-m", "uvicorn", "api.src.main:app", "--host", "127.0.0.1", "--port", "8880"], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        PHONEMIZER_ESPEAK_LIBRARY: "/opt/homebrew/lib/libespeak-ng.dylib",
+        USE_GPU: "false",
+        MODEL_DIR: `${dir}/api/src/models`,
+        VOICES_DIR: `${dir}/api/src/voices/v1_0`,
+        PROJECT_ROOT: dir,
+        VIRTUAL_ENV: `${dir}/venv`,
+        PATH: `${dir}/venv/bin:${process.env.PATH}`,
+      },
+      stdio: "ignore",
+    });
+    this.kokoroProcess.on("exit", () => { this.kokoroProcess = null; this.kokoroStartAttempted = false; });
+  }
+
+  private notifyCore(healthy: boolean): void {
+    const text = healthy
+      ? `[SYSTEM] Voice plugin: TTS (Kokoro) online. Voice: ${this.config.voice}.`
+      : `[SYSTEM] Voice plugin: TTS (Kokoro) offline at ${this.config.ttsUrl}.`;
+    this.bus.publish({ channel: "system.event", source: this.id, event: "tts.health", data: { healthy, message: text } });
+  }
+
+  private serveAudioStream(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, { "Content-Type": "audio/mpeg", "Transfer-Encoding": "chunked", "Cache-Control": "no-cache" });
+    this.audioStreamClients.add(res);
+    req.on("close", () => this.audioStreamClients.delete(res));
+  }
+
+  private serveLatest(res: ServerResponse): void {
+    if (!this.latestAudio) { res.writeHead(204); res.end(); return; }
+    res.writeHead(200, { "Content-Type": "audio/mpeg", "Content-Length": this.latestAudio.length });
+    res.end(this.latestAudio);
+  }
+
+  private stripMarkdown(text: string): string {
+    return text
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`[^`]+`/g, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[#*_~|>-]/g, "")
+      .replace(/\|[^\n]+\|/g, "")
+      .replace(/\n{2,}/g, ". ")
+      .replace(/\n/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  private registerCapabilities(): void {
+    this.capabilityRegistry.register({
+      name: "voice_set",
+      description: "Change the TTS voice. Use voice_list to see available voices.",
+      input_schema: {
+        type: "object",
+        properties: {
+          voice: { type: "string", description: "Voice ID (e.g. 'bm_george', 'pm_alex', 'af_nova')" },
+        },
+        required: ["voice"],
+      },
+      handler: async (input: any) => {
+        this.config.voice = String(input.voice);
+        this.updateHud();
+        this.persistConfig();
+        return { ok: true, voice: this.config.voice, message: `Voice changed to ${this.config.voice}` };
+      },
+    });
+
+    this.capabilityRegistry.register({
+      name: "voice_list",
+      description: "List all available TTS voices from the Kokoro engine.",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => {
+        try {
+          const res = await fetch(`${this.config.ttsUrl}/v1/audio/voices`);
+          const data = await res.json() as { voices: string[] };
+          return {
+            current: this.config.voice,
+            voices: data.voices,
+            categories: {
+              "af_*": "American Female", "am_*": "American Male",
+              "bf_*": "British Female", "bm_*": "British Male",
+              "ef_*": "European Female", "em_*": "European Male",
+              "pm_*": "Portuguese Male", "pf_*": "Portuguese Female",
+            },
+          };
+        } catch (err) {
+          return { error: `TTS server unreachable: ${err}` };
+        }
+      },
+    });
+
+    this.capabilityRegistry.register({
+      name: "voice_toggle",
+      description: "Enable or disable TTS voice output.",
+      input_schema: {
+        type: "object",
+        properties: {
+          enabled: { type: "boolean", description: "true to enable, false to disable" },
+        },
+        required: ["enabled"],
+      },
+      handler: async (input: any) => {
+        this.config.enabled = Boolean(input.enabled);
+        this.updateHud();
+        this.persistConfig();
+        return { ok: true, enabled: this.config.enabled };
+      },
+    });
+  }
+
+  private persistConfig(): void {
+    this.ctx.saveConfig({
+      voice: this.config.voice,
+      enabled: this.config.enabled,
+    });
+  }
+
+  private getData(): Record<string, unknown> {
+    return {
+      voice: this.config.voice,
+      model: this.config.model,
+      enabled: this.config.enabled,
+      speaking: this.speaking,
+      totalSpoken: this.totalSpoken,
+      ttsHealthy: this.ttsHealthy,
+    };
+  }
+
+  private updateHud(): void {
+    this.bus.publish({
+      channel: "hud.update",
+      source: this.id,
+      action: "update",
+      pieceId: this.id,
+      data: this.getData(),
+      status: this.speaking ? "processing" : this.config.enabled ? "running" : "stopped",
+    });
+  }
+}

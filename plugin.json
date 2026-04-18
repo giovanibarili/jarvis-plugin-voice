@@ -1,0 +1,13 @@
+{
+  "name": "jarvis-plugin-voice",
+  "version": "2.0.0",
+  "description": "Voice I/O for JARVIS — TTS (Kokoro) + STT (Whisper) + Voice HUD",
+  "author": "giovanibarili",
+  "entry": "pieces/index.ts",
+  "capabilities": {
+    "tools": false,
+    "pieces": true,
+    "renderers": true,
+    "prompts": false
+  }
+}
